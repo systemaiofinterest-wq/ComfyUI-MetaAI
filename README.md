@@ -15,7 +15,7 @@ Este es un entorno de trabajo no oficial, se implementaron metodos de scraping p
 1. Clone the repository:
 ```bash
 cd custom_nodes/
-git clone https://github.com/systemaiofinterest-wq/ComfyUI-Pixverse-AI.git
+git clone https://github.com/systemaiofinterest-wq/ComfyUI-MetaAI.git
 cd ComfyUI-MetaAI
 pip install -r requirements.txt
 playwright install
