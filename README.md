@@ -10,9 +10,13 @@ Este es un entorno de trabajo no oficial, se implementaron metodos de scraping p
 
 
 
+1. Install ffmpeg
+```bash
+instalar_ffmpeg.bat
+It is important that you have WinRAR installed for the .bat file to work and perform the entire process automatically.
+```
 
-
-1. Clone the repository:
+2. Clone the repository:
 ```bash
 cd custom_nodes/
 git clone https://github.com/systemaiofinterest-wq/ComfyUI-MetaAI.git
