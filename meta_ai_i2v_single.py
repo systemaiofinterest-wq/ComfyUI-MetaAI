@@ -1,4 +1,3 @@
-# ComfyUI_MetaAi/meta_ai_single_video.py
 import os
 import sys
 import time
@@ -33,6 +32,14 @@ class MetaAiSingleVideoGenerator:
             }
         }
 
+    # --- NUEVO MÉTODO AÑADIDO ---
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Al devolver NaN, ComfyUI asume que las entradas siempre han cambiado
+        # y forzará la ejecución del nodo cada vez que le des a "Queue Prompt".
+        return float("NaN")
+    # ----------------------------
+
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("video_path",)
     FUNCTION = "generate_video"
@@ -52,7 +59,6 @@ class MetaAiSingleVideoGenerator:
         # Convertir el tensor de imagen de ComfyUI a PIL Image
         try:
             # El tensor tiene forma (batch, height, width, channels)
-            # Tomamos la primera imagen si hay batch
             if len(image.shape) == 4:
                 img_tensor = image[0]  # Tomar la primera imagen del batch
             else:
@@ -79,6 +85,7 @@ class MetaAiSingleVideoGenerator:
 
         # Tomar solo el primer prompt
         current_prompt = prompt_lines[0]
+        video_path_final = None
 
         try:
             async with async_playwright() as p:
@@ -86,6 +93,7 @@ class MetaAiSingleVideoGenerator:
                     str(user_data_dir),
                     headless=False,
                     locale="en-US",
+                    permissions=["clipboard-read", "clipboard-write"],
                     args=[
                         "--start-maximized",
                         "--disable-blink-features=AutomationControlled",
@@ -110,142 +118,141 @@ class MetaAiSingleVideoGenerator:
                     document.dispatchEvent(new Event('visibilitychange'));
                 """)
 
-                # Navegar a la página y seleccionar video
-                await page.goto("https://www.meta.ai/media  ", timeout=60000)
-                try:
-                    await page.wait_for_selector('text="Image"', timeout=30000)
-                    await page.click('text="Image"')
-                    await asyncio.sleep(1)
-                    await page.wait_for_selector('text="Video"', timeout=15000)
-                    await page.click('text="Video"')
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    print(f"[WARN] Navegación inicial inestable: {e}", file=sys.stderr)
+                print("[INFO] Cargando Meta AI...")
+                await page.goto("https://www.meta.ai/media", timeout=60000)
+                await page.wait_for_load_state("networkidle")
 
-                # Subir imagen
+                # --- 1. CAMBIAR A MODO VIDEO ---
                 try:
-                    await page.wait_for_selector('text="Upload image"', timeout=15000)
-                    async with page.expect_file_chooser() as fc_info:
-                        await page.click('text="Upload image"')
-                    file_chooser = await fc_info.value
-                    await file_chooser.set_files(current_input_path)
+                    print("[INFO] Verificando modo Video...")
                     await asyncio.sleep(2)
-                except Exception:
-                    # Intento fallback
-                    try:
-                        await page.set_input_files('input[type="file"]', current_input_path)
-                    except Exception as e:
-                        raise RuntimeError(f"Falló subida de imagen: {e}")
-
-                # Prompt
-                prompt_container_selector = 'div[contenteditable="true"][role="textbox"]'
-                await page.wait_for_selector(prompt_container_selector, timeout=15000)
-                await page.click(prompt_container_selector)
-                await page.keyboard.press("Control+a")
-                await page.keyboard.press("Delete")
-                await asyncio.sleep(0.3)
-                await page.fill(prompt_container_selector, current_prompt)
-                await asyncio.sleep(0.5)
-
-                # Botón Animate
-                animar_selector = 'div[role="button"]:has-text("Animate")'
-                clicked = False
-                for _ in range(180):  # ~90s
-                    btn = await page.query_selector(animar_selector)
-                    if btn:
-                        tabindex = await btn.get_attribute("tabindex")
-                        aria_disabled = await btn.get_attribute("aria-disabled")
-                        if tabindex == "0" and aria_disabled != "true":
-                            await btn.click()
-                            clicked = True
-                            break
-                    await asyncio.sleep(0.5)
-
-                if not clicked:
-                    raise TimeoutError("Botón 'Animate' no se activó")
-
-                # Esperar video
-                video_url = await self.wait_for_video_after_overlay_disappears(page, max_wait=150)
-
-                base_name = self.get_next_meta_name()
-                video_path = self.output_dir / f"{base_name}.mp4"
-
-                response = requests.get(
-                    video_url,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                    stream=True,
-                    timeout=30
-                )
-                response.raise_for_status()
-                with open(video_path, "wb") as f:
-                    for chunk in response.iter_content(8192):
-                        f.write(chunk)
-
-                # --- Eliminar chat en bucle hasta eliminar todos los chats ---
-                max_attempts = 50  # Limitar intentos para evitar bucles infinitos
-                attempts = 0
-                
-                while attempts < max_attempts:
-                    try:
-                        # Verificar si hay botones de menú disponibles
-                        menu_btn = page.locator('div[aria-label*="More options"]').last
-                        menu_btns_count = await menu_btn.count()
-                        
-                        if menu_btns_count == 0:
-                            print(f"[INFO] No se encontraron más chats para eliminar. Total intentos: {attempts}")
-                            break
-                        
-                        print(f"[INFO] Encontrado chat disponible. Eliminando...")
-                        
-                        # Hacer clic en el botón de menú
-                        await menu_btn.click(force=True)
+                    mode_trigger = page.locator('button, [role="button"]').filter(has_text="Image").first
+                    if await mode_trigger.is_visible():
+                        await mode_trigger.click()
                         await asyncio.sleep(1)
+                        video_option = page.get_by_text("Video", exact=True).locator("visible=true").last
+                        await video_option.click()
+                        print("[INFO] Modo 'Video' seleccionado con éxito.")
+                    else:
+                        print("[INFO] El modo 'Video' ya parece estar activo.")
+                except Exception as e:
+                    print(f"[WARN] No se pudo cambiar el modo manualmente: {e}", file=sys.stderr)
 
-                        # Hacer clic en la opción de eliminar chat
-                        delete_opt = page.locator('div[role="menuitem"]:has-text("Delete chat")').first
-                        if not await delete_opt.is_visible():
-                            delete_opt = page.locator('text="Delete chat"').first
-                        if await delete_opt.is_visible():
-                            await delete_opt.click(force=True)
-                            await asyncio.sleep(1)
+                # --- 2. SUBIR IMAGEN ---
+                try:
+                    print(f"[INFO] Intentando subir imagen: {current_input_path}")
+                    attach_btn = page.locator('button[data-testid="composer-add-attachment-button"]')
+                    if await attach_btn.count() > 0:
+                        async with page.expect_file_chooser() as fc_info:
+                            await attach_btn.first.click()
+                        file_chooser = await fc_info.value
+                        await file_chooser.set_files(current_input_path)
+                        
+                        # Esperar a que la imagen cargue (desaparición de clase opacity-70)
+                        print("[INFO] Esperando procesamiento de imagen...")
+                        await page.locator('img[src^="blob:"]:not(.opacity-70)').first.wait_for(state="visible", timeout=30000)
+                        print("[INFO] Imagen cargada correctamente.")
+                        await asyncio.sleep(2)
+                    else:
+                        print("[ERROR] No se encontró el botón de adjuntar archivo.")
+                except Exception as e:
+                    print(f"[ERROR] Error durante la subida de imagen: {e}", file=sys.stderr)
 
-                            # Confirmar la eliminación
-                            confirm = page.locator('div[aria-label="Delete"]').first
-                            if not await confirm.is_visible():
-                                confirm = page.locator('span:text-is("Delete")').last
-                            if await confirm.is_visible():
-                                await confirm.click(force=True)
-                        
-                        # Esperar un poco para que se complete la eliminación
-                        await page.wait_for_timeout(2000)
-                        
-                        # Volver a verificar si hay más chats después de eliminar
-                        continue  # Continuar con la siguiente iteración del bucle
-                        
-                    except Exception as e:
-                        print(f"[WARN] Error en el proceso de eliminación de chat #{attempts + 1}: {e}", file=sys.stderr)
-                        attempts += 1
-                        continue
+                # --- 3. INGRESAR PROMPT Y GENERAR ---
+                video_selector = 'div[data-testid="generated-video"]'
+                initial_video_count = await page.locator(video_selector).count()
+                print(f"[INFO] Videos detectados antes de generar: {initial_video_count}")
+
+                prompt_locator = page.locator('div[contenteditable="true"][role="textbox"]')
+                await prompt_locator.wait_for(state="visible")
+                await prompt_locator.click()
                 
-                if attempts >= max_attempts:
-                    print(f"[WARN] Se alcanzó el límite de intentos ({max_attempts}) para eliminar chats.")
+                # Usar el portapapeles para insertar el texto y evitar bloqueos
+                await page.evaluate("async (text) => { await navigator.clipboard.writeText(text); }", current_prompt)
+                await page.keyboard.press("Control+V")
+                await asyncio.sleep(1)
+                await page.keyboard.press("Enter")
+                print("[INFO] Prompt enviado. Generando video...")
 
-                # Cerrar el navegador
+                # --- 4. BUCLE DE ESPERA PARA LA GENERACIÓN ---
+                start_time = time.time()
+                wait_timeout = 240  # 4 minutos máximo
+                new_video_found = False
+                
+                while time.time() - start_time < wait_timeout:
+                    current_count = await page.locator(video_selector).count()
+                    if current_count > initial_video_count:
+                        new_video_found = True
+                        print(f"[INFO] ¡Nuevo video generado detectado! (Total: {current_count})")
+                        break
+                    await asyncio.sleep(4)
+
+                # --- 5. IDENTIFICAR Y DESCARGAR EL ÚLTIMO VIDEO ---
+                if new_video_found:
+                    print("[INFO] Esperando a que el video esté listo para descarga...")
+                    await asyncio.sleep(10)  # Tiempo de gracia
+                    
+                    all_videos = await page.locator(video_selector).all()
+                    
+                    if all_videos:
+                        target_video_locator = all_videos[0]
+                        print("[INFO] Seleccionando el primer video de la lista (índice 0)...")
+                        
+                        try:
+                            video_url = await target_video_locator.get_attribute("data-video-url")
+                            if not video_url:
+                                video_tag = target_video_locator.locator("video").first
+                                video_url = await video_tag.get_attribute("src")
+
+                            if video_url:
+                                print(f"[INFO] Iniciando descarga...")
+                                response = await page.request.get(video_url, timeout=60000)
+                                if response.status == 200:
+                                    base_name = namevideo if namevideo else self.get_next_meta_name()
+                                    video_path = self.output_dir / f"{base_name}.mp4"
+                                    
+                                    body = await response.body()
+                                    with open(video_path, "wb") as f:
+                                        f.write(body)
+                                        
+                                    video_path_final = str(video_path.resolve()).replace("\\", "/")
+                                    print(f"[SUCCESS] ¡Video guardado con éxito! -> {video_path_final}")
+                                else:
+                                    print(f"[ERROR] HTTP {response.status} al intentar descargar el archivo.")
+                            else:
+                                print("[ERROR] No se pudo localizar la URL de descarga.")
+                        except Exception as e:
+                            print(f"[ERROR] Error durante la descarga: {e}", file=sys.stderr)
+                    else:
+                        print("[ERROR] No se encontraron elementos de video tras la generación.")
+                else:
+                    print("[ERROR] El tiempo de espera terminó sin detectar un video nuevo.")
+
+                # --- 6. LIMPIEZA DE HISTORIAL (Eliminando solo el actual para evitar bucles colgados) ---
+                print("[INFO] Limpiando historial del chat...")
+                try:
+                    dots_menu = page.locator('button:has(svg path[d*="M8 14.125"])').first
+                    if await dots_menu.is_visible():
+                        await dots_menu.click()
+                        await asyncio.sleep(1)
+                        await page.get_by_text("Delete", exact=True).first.click()
+                        await asyncio.sleep(1)
+                        await page.get_by_role("button", name="Delete").click()
+                        print("[INFO] Historial eliminado.")
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    print(f"[WARN] No se pudo realizar la limpieza del historial: {e}", file=sys.stderr)
+
                 await context.close()
 
-                # Renombrar video si se proporciona un nombre
-                if namevideo:
-                    final_video_path = self.output_dir / f"{namevideo}.mp4"
-                    if final_video_path.exists():
-                        final_video_path.unlink()
-                    Path(video_path).rename(final_video_path)
-                    video_path = final_video_path
-
-                # Devolver el path del video
-                return (str(video_path.resolve()).replace("\\", "/"),)
+                if video_path_final:
+                    return (video_path_final,)
+                else:
+                    return (None,)
 
         except Exception as e:
-            print(f"[ERROR] {e}", file=sys.stderr)
+            print(f"[ERROR CRÍTICO] {e}", file=sys.stderr)
+            traceback.print_exc()
             return (None,)
 
     def get_next_meta_name(self) -> str:
@@ -257,33 +264,6 @@ class MetaAiSingleVideoGenerator:
                 numbers.append(int(match.group(1)))
         next_num = max(numbers) + 1 if numbers else 1
         return f"meta_{next_num:03d}"
-
-    async def wait_for_video_after_overlay_disappears(self, page, max_wait=150):
-        overlay_selector = 'div[style*="--x-backdropFilter: blur"]'
-
-        try:
-            await page.wait_for_selector(overlay_selector, state="attached", timeout=15000)
-        except:
-            pass
-
-        try:
-            await page.wait_for_selector(overlay_selector, state="detached", timeout=max_wait * 1000)
-        except:
-            pass
-
-        for _ in range(max_wait):
-            video_elements = await page.query_selector_all("video")
-            for video in video_elements:
-                try:
-                    src = await video.get_attribute("src")
-                    if src and isinstance(src, str) and src.strip().startswith("http") and "blob:" not in src:
-                        return src
-                except:
-                    pass
-            await asyncio.sleep(1)
-
-        raise RuntimeError("No se encontró URL de video descargable.")
-
 
 # Importar torch si no está disponible
 try:
