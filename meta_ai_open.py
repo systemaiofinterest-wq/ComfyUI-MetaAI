@@ -22,6 +22,14 @@ class MetaAiBrowserNode:
             }
         }
 
+    # --- NUEVO MÉTODO AÑADIDO ---
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Al devolver NaN, ComfyUI asume que las entradas siempre han cambiado
+        # y forzará la ejecución del nodo cada vez que le des a "Queue Prompt".
+        return float("NaN")
+    # ----------------------------
+
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("profile_path",)
     FUNCTION = "launch_browser"
